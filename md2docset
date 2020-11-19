@@ -1,0 +1,129 @@
+#!/usr/bin/env perl
+
+# Read the MD file:
+#
+#   -- find the <!-- dash: Name | Type --> data, generate appropriate SQL
+#   -- change .md to .html in links
+#   -- run the file through pandoc
+
+
+use strict;
+use autodie;
+use 5.10.0;
+
+use File::Path qw[ make_path ];
+use FindBin;
+use LWP::Simple;
+
+our $INPUT       = "$FindBin::Bin/../nitrogen_core/doc/markdown";
+our $OUTPUT_BASE = "$FindBin::Bin/Nitrogen.docset";
+our $DB          = "$OUTPUT_BASE/Contents/Resources/docSet.dsidx";
+our $HTML        = "$OUTPUT_BASE/Contents/Resources/Documents";
+our $PLIST       = "$OUTPUT_BASE/Contents/Info.plist";
+our $CSS         = "$HTML/nitrogen.css";
+
+our $REFERENCE_PLIST = "$FindBin::Bin/Info.plist";
+
+my $gh = 'https://raw.githubusercontent.com/nitrogen';
+our @SOURCE_CSS_URLs = (
+                        "$gh/nitrogen_core/master/www/nitrogen.css",
+                        "$gh/NitrogenProject.com/master/static/css/style.css"
+                       );
+
+# Create the docset directory structure.
+make_path($HTML);
+
+# Move the plist into place.
+`cp $FindBin::Bin/Info.plist $PLIST`;
+
+# Generate a list of the MD files to be processed.
+opendir(my $dh, $INPUT);
+my @files = grep { /.*\.md/ } readdir($dh);
+closedir($dh);
+
+# Generate the reference CSS file.
+generate_css($CSS, @SOURCE_CSS_URLs);
+
+# Generate the HTTML with pandoc.
+my @metadata = generate_html(@files);
+
+# Populate the Dash index.
+build_index(@metadata);
+
+sub generate_css {
+  my ($outfile, @source_urls) = @_;
+  my @css_data = map { `wget -O - $_ 2>/dev/null` } @source_urls;
+  open my $fh, '>', $outfile;
+  print $fh join "" => @css_data;
+  close $fh;
+}
+
+sub generate_html {
+  my @metadata = ();
+  for my $file (@_) {
+    my ($page_name, $page_type, $page_attrs) = parse_file($file);
+    my $out = ($file =~ s/md$/html/r);
+    my $md = qq!--metadata title="$page_name"!;
+    my $css = "--css nitrogen.css";
+    my $mounts = "-v $INPUT:/pandoc -v $HTML:/output";
+    my $img = 'dalibo/pandocker';
+    say <<`EOF`;
+docker run --rm -u $> $mounts $img -o /output/$out --ascii $css -s $md $file
+EOF
+    push @metadata => [$out, $page_name, $page_type, $page_attrs];
+  }
+  return @metadata;
+}
+
+sub build_index {
+  unlink $DB if -e $DB;
+  my ($table, $index) = (table_definition(), index_definition());
+  `sqlite3 $DB $table`;
+  `sqlite3 $DB $index`;
+  for my $md (@_) {
+    my ($file, $name, $type, $attrs) = @{$md};
+    my $stmt = make_stmt($name, $type, $file);
+    `sqlite3 $DB '$stmt'`;
+  }
+}
+
+sub make_stmt {
+  my ($file, $name, $type) = @_;
+  <<EOF;
+INSERT OR IGNORE INTO searchIndex(name, type, path) 
+VALUES ("$file", "$name", "$type")
+EOF
+}
+
+sub table_definition {
+  <<EOF;
+   'CREATE TABLE searchIndex(
+      id INTEGER PRIMARY KEY, 
+      name TEXT, 
+      type TEXT, 
+      path TEXT)';
+EOF
+}
+
+sub index_definition {
+  <<EOF;
+  'CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path)';
+EOF
+}
+
+sub parse_file {
+  my ($name, $type, $attrs, @rewritten_lines) = ();
+  my $source_file = $INPUT . "/" . shift;
+  open my $fh, '<', $source_file;
+  while (<$fh>) {
+    if ($_ =~ /<!--\s+dash:\s+(.+?)\s+-->/) {
+      ($name, $type, $attrs) = split /\s*\|\s*/, $1;
+    }
+    push @rewritten_lines => s/\((.+?)\.md\)/\($1.html\)/gr;
+  }
+  close $fh;
+  
+  open my $fh, '>', $source_file;
+  print $fh @rewritten_lines;
+  return ($name, $type, $attrs);
+}
