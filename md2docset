@@ -45,19 +45,24 @@ our @SOURCE_CSS_URLs = (
                         "$gh/NitrogenProject.com/master/static/css/style.css"
                        );
 
+our @IGNORE_MD_FILES = qw[ blank header ];
+our %IGNORE_MD_FILES = map { $_ . ".md", 1 } @IGNORE_MD_FILES;
+
 # Create the docset directory structure.
 make_path($HTML);
 
-# Move the plist into place.
+# Move the plist.
 `cp $FindBin::Bin/Info.plist $PLIST`;
+
+# Move the icon.
+`cp $FindBin::Bin/icon.png $OUTPUT_BASE`;
 
 # Create the DB.
 create_db();
 
 # Generate a list of the MD files to be processed.
 opendir(my $dh, $INPUT);
-#my @files = grep { /.*\.md/ } readdir($dh);
-my @files = grep { /^a.+\.md/ } readdir($dh);
+my @files = grep { /.*\.md/ } readdir($dh);
 closedir($dh);
 
 # Generate the reference CSS file.
@@ -80,6 +85,7 @@ sub generate_css {
 sub generate_html {
   my @metadata = ();
   for my $file (@_) {
+    next if exists $IGNORE_MD_FILES{$file};
     my ($page_name, $page_type, $page_attrs) = parse_file($file);
     my $out = ($file =~ s/md$/html/r);
     my $md = qq!--metadata title="$page_name"!;
