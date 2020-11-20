@@ -1,10 +1,24 @@
 #!/usr/bin/env perl
 
-# Read the MD file:
-#
-#   -- find the <!-- dash: Name | Type --> data, generate appropriate SQL
-#   -- change .md to .html in links
-#   -- run the file through pandoc
+## Each .md file might have a comment at the top:
+##
+##  <!-- dash: <Name> | <Type> | <Attrs> -->
+##
+## Name is the name of the page (duh).
+## Type is the Dash Entry Type (https://kapeli.com/docsets)
+## Attrs indicates if anything on the page should be added to the ToC.
+##
+## Attrs are specified like
+##
+##  ##:Section
+##
+## where the "##" indicates the markup and Section is a Dash Entry
+## Type.  Multiple attrs can be specified, they should be separated by
+## a semicolon, e.g.,
+##
+##  <!-- dash: Some Page | Guide | ##:Section; ###:Entry -->
+
+
 
 
 use strict;
@@ -13,7 +27,8 @@ use 5.10.0;
 
 use File::Path qw[ make_path ];
 use FindBin;
-use LWP::Simple;
+use URI::Escape;
+use Data::Dumper;
 
 our $INPUT       = "$FindBin::Bin/../nitrogen_core/doc/markdown";
 our $OUTPUT_BASE = "$FindBin::Bin/Nitrogen.docset";
@@ -36,9 +51,13 @@ make_path($HTML);
 # Move the plist into place.
 `cp $FindBin::Bin/Info.plist $PLIST`;
 
+# Create the DB.
+create_db();
+
 # Generate a list of the MD files to be processed.
 opendir(my $dh, $INPUT);
-my @files = grep { /.*\.md/ } readdir($dh);
+#my @files = grep { /.*\.md/ } readdir($dh);
+my @files = grep { /^a.+\.md/ } readdir($dh);
 closedir($dh);
 
 # Generate the reference CSS file.
@@ -67,7 +86,7 @@ sub generate_html {
     my $css = "--css nitrogen.css";
     my $mounts = "-v $INPUT:/pandoc -v $HTML:/output";
     my $img = 'dalibo/pandocker';
-    say <<`EOF`;
+    <<`EOF`;
 docker run --rm -u $> $mounts $img -o /output/$out --ascii $css -s $md $file
 EOF
     push @metadata => [$out, $page_name, $page_type, $page_attrs];
@@ -75,14 +94,17 @@ EOF
   return @metadata;
 }
 
-sub build_index {
+sub create_db {
   unlink $DB if -e $DB;
   my ($table, $index) = (table_definition(), index_definition());
   `sqlite3 $DB $table`;
   `sqlite3 $DB $index`;
+}  
+
+sub build_index {
   for my $md (@_) {
     my ($file, $name, $type, $attrs) = @{$md};
-    my $stmt = make_stmt($name, $type, $file);
+    my $stmt = make_stmt($file, $name, $type);
     `sqlite3 $DB '$stmt'`;
   }
 }
@@ -91,7 +113,7 @@ sub make_stmt {
   my ($file, $name, $type) = @_;
   <<EOF;
 INSERT OR IGNORE INTO searchIndex(name, type, path) 
-VALUES ("$file", "$name", "$type")
+VALUES ("$name", "$type", "$file")
 EOF
 }
 
@@ -112,13 +134,27 @@ EOF
 }
 
 sub parse_file {
+  my $filename = shift;
+  my $html_file = ($filename =~ s/.md$/.html/r);
   my ($name, $type, $attrs, @rewritten_lines) = ();
-  my $source_file = $INPUT . "/" . shift;
+  my $source_file = $INPUT . "/" . $filename;
   open my $fh, '<', $source_file;
+  say "Reading $source_file";
   while (<$fh>) {
     if ($_ =~ /<!--\s+dash:\s+(.+?)\s+-->/) {
       ($name, $type, $attrs) = split /\s*\|\s*/, $1;
     }
+
+    # maybe add a table of contents anchor.
+    my %TOC = make_toc_lookup($attrs);
+    for my $markup (keys %TOC) {
+      s/^\s*($markup)\s+(.+)/toc_markup($1, $2, $TOC{$markup})/e;
+    }
+
+    # maybe add a function.
+    s/(`(wf:.+?)\((.*?)\).*?`)/register_fn($1, $2, $3, $html_file)/eg;
+
+    # sub .html for .md in links
     push @rewritten_lines => s/\((.+?)\.md\)/\($1.html\)/gr;
   }
   close $fh;
@@ -126,4 +162,32 @@ sub parse_file {
   open my $fh, '>', $source_file;
   print $fh @rewritten_lines;
   return ($name, $type, $attrs);
+}
+
+sub make_toc_lookup {
+  my $attrs = shift;
+  my %toc = ();
+  for my $attr (split /\s*;\s*/ => $attrs) {
+    my ($markup, $type) = split /\s*:\s*/ => $attr;
+    $toc{$markup} = $type;
+  }
+  return %toc;
+}
+  
+
+sub toc_markup {
+  my ($markup, $value, $type) = @_;
+  my $enc_value = uri_escape($value);
+  my $anchor = "//apple_ref/cpp/$type/$enc_value";
+  my $tag = qq!<a name="$anchor" class="dashAnchor">!;
+  return qq!$markup $tag$value</a>!;
+}
+
+sub register_fn {
+  my ($phrase, $fn, $args, $filename) = @_;
+  my $arity = scalar(split /\s*,\s*/, $args);
+  my $anchor = "//apple_ref/cpp/Function/$fn%2F$arity";
+  my $stmt = make_stmt("$filename#$anchor", "$fn/$arity", "Function");
+  `sqlite3 $DB '$stmt'`;
+  return qq!<a name="$anchor" class="dashAnchor">$phrase</a>!;
 }
